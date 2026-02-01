@@ -1,75 +1,68 @@
 import express from 'express';
 import Import from '../models/Import.js';
 import Product from '../models/Product.js';
+import { handleAsyncError } from '../utils/errorHandler.js';
 
 const router = express.Router();
 
 // GET imports by user email
-router.get('/:email', async (req, res) => {
-    try {
-        const imports = await Import.find({ userEmail: req.params.email }).populate('productId');
-        res.json(imports);
-    } catch (error) {
-        res.status(500).json({ message: error.message });
+router.get('/:email', handleAsyncError(async (req, res) => {
+    const imports = await Import.find({ userEmail: req.params.email }).populate('productId');
+    res.json(imports);
+}));
+
+const validateImportRequest = async (productId, quantity) => {
+    const product = await Product.findById(productId);
+    if (!product) {
+        return { isValid: false, error: 'Product not found', product: null };
     }
-});
+
+    if (product.quantity < quantity) {
+        return { isValid: false, error: 'Insufficient stock available', product };
+    }
+
+    return { isValid: true, product };
+};
+
+const createImportAndUpdateProduct = async (importData, product) => {
+    const newImport = new Import(importData);
+    await newImport.save();
+
+    product.quantity -= importData.quantity;
+    await product.save();
+
+    return newImport;
+};
 
 // POST create import
-router.post('/', async (req, res) => {
+router.post('/', handleAsyncError(async (req, res) => {
     const { productId, quantity, userId, userEmail } = req.body;
 
-    try {
-        // 1. Find the product
-        const product = await Product.findById(productId);
-        if (!product) {
-            return res.status(404).json({ message: 'Product not found' });
-        }
-
-        // 2. Validate quantity
-        if (product.quantity < quantity) {
-            return res.status(400).json({ message: 'Insufficient stock available' });
-        }
-
-        // 3. Create Import record
-        const newImport = new Import({
-            userId,
-            userEmail,
-            productId,
-            quantity
-        });
-
-        await newImport.save();
-
-        // 4. Update Product quantity ($inc -quantity)
-        product.quantity -= quantity;
-        await product.save();
-
-        res.status(201).json(newImport);
-    } catch (error) {
-        res.status(400).json({ message: error.message });
+    // Validate the import request
+    const validation = await validateImportRequest(productId, quantity);
+    if (!validation.isValid) {
+        return res.status(400).json({ message: validation.error });
     }
-});
+
+    // Create import and update product
+    const newImport = await createImportAndUpdateProduct({
+        userId,
+        userEmail,
+        productId,
+        quantity
+    }, validation.product);
+
+    res.status(201).json(newImport);
+}));
 
 // DELETE remove import
-router.delete('/:id', async (req, res) => {
-    try {
-        const importItem = await Import.findById(req.params.id);
-        if (!importItem) return res.status(404).json({ message: 'Import not found' });
-
-        // Optional: Restore stock? The requirement doesn't explicitly say so, but it's good practice.
-        // However, for "Import" it might mean "Consuming".
-        // "My Imports" -> "Remove" might just mean "remove from my list".
-        // But if I "un-import", logically items should return.
-        // Let's NOT restore stock automatically to avoid complex business logic assumptions unless specified.
-        // Actually wait, "Add Export" -> "All Products". "Import" -> "My Imports".
-        // If I remove from "My Imports", it's deleted.
-        // Let's just delete the record.
-
-        await importItem.deleteOne();
-        res.json({ message: 'Import removed successfully' });
-    } catch (error) {
-        res.status(500).json({ message: error.message });
+router.delete('/:id', handleAsyncError(async (req, res) => {
+    const importItem = await Import.findByIdAndDelete(req.params.id);
+    if (!importItem) {
+        return res.status(404).json({ message: 'Import not found' });
     }
-});
+
+    res.json({ message: 'Import removed successfully' });
+}));
 
 export default router;

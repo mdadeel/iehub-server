@@ -4,6 +4,7 @@ import cors from 'cors';
 import mongoose from 'mongoose';
 import productRoutes from './routes/productRoutes.js';
 import importRoutes from './routes/importRoutes.js';
+import { globalErrorHandler } from './utils/errorHandler.js';
 
 dotenv.config();
 
@@ -29,6 +30,9 @@ app.get('/api/health', (req, res) => {
 app.get('/', (req, res) => {
     res.send('Import Export Hub API is running...');
 });
+
+// Global error handler middleware
+app.use(globalErrorHandler);
 
 // Database Connection
 mongoose.connect(process.env.MONGODB_URI)

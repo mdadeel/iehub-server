@@ -1,96 +1,95 @@
 import express from 'express';
 import Product from '../models/Product.js';
+import { handleAsyncError } from '../utils/errorHandler.js';
 
 const router = express.Router();
 
-// GET all products with filtering and searching
-router.get('/', async (req, res) => {
-    try {
-        const { search, category, sort, exporterEmail } = req.query;
-        let query = {};
+const buildProductQuery = (query) => {
+    const { search, category, exporterEmail } = query;
+    let filter = {};
 
-        if (search) {
-            query.name = { $regex: search, $options: 'i' };
-        }
-
-        if (category && category !== 'All') {
-            query.category = category;
-        }
-
-        if (exporterEmail) {
-            query.exporterEmail = exporterEmail;
-        }
-
-        let sortOption = {};
-        if (sort === 'price-low') sortOption = { price: 1 };
-        else if (sort === 'price-high') sortOption = { price: -1 };
-        else if (sort === 'rating') sortOption = { rating: -1 };
-        else if (sort === 'name') sortOption = { name: 1 };
-        else sortOption = { createdAt: -1 }; // Default: Newest first
-
-        const products = await Product.find(query).sort(sortOption);
-        res.json(products);
-    } catch (error) {
-        res.status(500).json({ message: error.message });
+    if (search) {
+        filter.name = { $regex: search, $options: 'i' };
     }
-});
+
+    if (category && category !== 'All') {
+        filter.category = category;
+    }
+
+    if (exporterEmail) {
+        filter.exporterEmail = exporterEmail;
+    }
+
+    return filter;
+};
+
+const getProductSortOption = (sortParam) => {
+    switch (sortParam) {
+        case 'price-low': return { price: 1 };
+        case 'price-high': return { price: -1 };
+        case 'rating': return { rating: -1 };
+        case 'name': return { name: 1 };
+        default: return { createdAt: -1 };
+    }
+};
+
+// GET all products with filtering and searching
+router.get('/', handleAsyncError(async (req, res) => {
+    const filter = buildProductQuery(req.query);
+    const sortOption = getProductSortOption(req.query.sort);
+
+    const products = await Product.find(filter).sort(sortOption);
+    res.json(products);
+}));
 
 // GET single product
-router.get('/:id', async (req, res) => {
-    try {
-        const product = await Product.findById(req.params.id);
-        if (!product) return res.status(404).json({ message: 'Product not found' });
-        res.json(product);
-    } catch (error) {
-        res.status(500).json({ message: error.message });
+router.get('/:id', handleAsyncError(async (req, res) => {
+    const product = await Product.findById(req.params.id);
+    if (!product) return res.status(404).json({ message: 'Product not found' });
+    res.json(product);
+}));
+
+// Helper function to validate product quantity
+const validateProductQuantity = (quantity) => {
+    if (quantity !== undefined && quantity < 0) {
+        return { isValid: false, message: "Quantity cannot be negative" };
     }
-});
+    return { isValid: true };
+};
 
 // POST create product (Add Export)
-router.post('/', async (req, res) => {
+router.post('/', handleAsyncError(async (req, res) => {
     const product = new Product(req.body);
-    try {
-        const newProduct = await product.save();
-        res.status(201).json(newProduct);
-    } catch (error) {
-        res.status(400).json({ message: error.message });
-    }
-});
+    const newProduct = await product.save();
+    res.status(201).json(newProduct);
+}));
 
 // PATCH update product (Update details or reduce quantity)
-router.patch('/:id', async (req, res) => {
-    try {
-        const product = await Product.findById(req.params.id);
-        if (!product) return res.status(404).json({ message: 'Product not found' });
-
-        // Handle quantity reduction for imports specially if needed, 
-        // but for now generic update works for both Use Cases (Edit & Import)
-        // If logic gets complex, we can separate endpoints.
-
-        // Example specific logic: check if reducing quantity is valid
-        if (req.body.quantity !== undefined && req.body.quantity < 0) {
-            return res.status(400).json({ message: "Quantity cannot be negative" });
-        }
-
-        Object.assign(product, req.body);
-        const updatedProduct = await product.save();
-        res.json(updatedProduct);
-    } catch (error) {
-        res.status(400).json({ message: error.message });
+router.patch('/:id', handleAsyncError(async (req, res) => {
+    const product = await Product.findById(req.params.id);
+    if (!product) {
+        return res.status(404).json({ message: 'Product not found' });
     }
-});
+
+    // Validate quantity if present in update
+    const quantityValidation = validateProductQuantity(req.body.quantity);
+    if (!quantityValidation.isValid) {
+        return res.status(400).json({ message: quantityValidation.message });
+    }
+
+    Object.assign(product, req.body);
+    const updatedProduct = await product.save();
+    res.json(updatedProduct);
+}));
 
 // DELETE product
-router.delete('/:id', async (req, res) => {
-    try {
-        const product = await Product.findById(req.params.id);
-        if (!product) return res.status(404).json({ message: 'Product not found' });
-
-        await product.deleteOne();
-        res.json({ message: 'Product deleted' });
-    } catch (error) {
-        res.status(500).json({ message: error.message });
+router.delete('/:id', handleAsyncError(async (req, res) => {
+    const product = await Product.findByIdAndDelete(req.params.id);
+    if (!product) {
+        return res.status(404).json({ message: 'Product not found' });
     }
-});
+
+    res.json({ message: 'Product deleted' });
+}));
 
 export default router;
