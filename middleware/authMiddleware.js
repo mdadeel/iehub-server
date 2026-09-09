@@ -1,4 +1,5 @@
 import { ApiError } from '../utils/errorHandler.js';
+import { PlatformRole } from '../lib/roles.js';
 
 const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || 'admin121@gmail.com,admin@importexport.com')
     .split(',')
@@ -27,7 +28,8 @@ export const verifyAuth = async (req, res, next) => {
                 uid: token,
                 email: 'guest@example.com',
                 isGuest: true,
-                isAdmin: false
+                isAdmin: false,
+                platformRole: null
             };
             return next();
         }
@@ -37,7 +39,8 @@ export const verifyAuth = async (req, res, next) => {
                 email: 'admin121@gmail.com',
                 displayName: 'Demo Administrator',
                 isGuest: false,
-                isAdmin: true
+                isAdmin: true,
+                platformRole: PlatformRole.SuperAdmin
             };
             return next();
         }
@@ -60,12 +63,14 @@ export const verifyAuth = async (req, res, next) => {
 
         const email = (payload.email || '').toLowerCase();
         const isAdmin = ADMIN_EMAILS.includes(email);
+        const platformRole = isAdmin ? PlatformRole.SuperAdmin : null;
 
         req.user = {
             uid: payload.sub || payload.user_id,
             email,
             displayName: payload.name || '',
             isAdmin,
+            platformRole,
             isGuest: false
         };
 

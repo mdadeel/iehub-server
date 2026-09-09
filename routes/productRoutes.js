@@ -2,7 +2,9 @@ import express from 'express';
 import Product from '../models/Product.js';
 import AuditLog from '../models/AuditLog.js';
 import { handleAsyncError, ApiError } from '../utils/errorHandler.js';
-import { verifyAuth, requireAdmin } from '../middleware/authMiddleware.js';
+import { verifyAuth } from '../middleware/authMiddleware.js';
+import { resolveOrg } from '../middleware/resolveOrg.js';
+import { requirePermission, requirePlatformRole } from '../middleware/requirePermission.js';
 
 const router = express.Router();
 
@@ -70,12 +72,12 @@ const validateProductQuantity = (quantity) => {
     return { isValid: true };
 };
 
-// POST create product (Add Export) — Authenticated
-router.post('/', verifyAuth, handleAsyncError(async (req, res) => {
+// POST create product (Add Export) — Authenticated + org role gate
+router.post('/', verifyAuth, resolveOrg, requirePermission('product:create'), handleAsyncError(async (req, res) => {
     const allowed = ['name', 'image', 'price', 'origin', 'rating', 'quantity', 'category', 'description', 'incoterm', 'unit', 'moq', 'portOfOrigin', 'currency'];
     const data = {};
     for (const k of allowed) if (req.body[k] !== undefined) data[k] = req.body[k];
-    
+
     // Enforce exporterEmail strictly from authenticated token
     data.exporterEmail = req.user.email;
 
@@ -83,21 +85,21 @@ router.post('/', verifyAuth, handleAsyncError(async (req, res) => {
         throw new ApiError('Missing required fields: name, image, price, origin, quantity, category', 400);
     }
     if (typeof data.price !== 'number' || data.price < 0) throw new ApiError('Price must be a non-negative number', 400);
-    if (typeof data.quantity !== 'number' || data.quantity < 0) throw new ApiError('Quantity must be a non-negative number', 400);
-    
+    if (typeof data.quantity !== 'number' || data.quantity < 0) throw new ApiError('Quantity must be a non-negative number');
+
     const product = new Product(data);
     const newProduct = await product.save();
     res.status(201).json(newProduct);
 }));
 
 // PATCH update product — Authenticated (Owner or Admin)
-router.patch('/:id', verifyAuth, handleAsyncError(async (req, res) => {
+router.patch('/:id', verifyAuth, resolveOrg, requirePermission('product:update(own)'), handleAsyncError(async (req, res) => {
     const product = await Product.findById(req.params.id);
     if (!product) {
         return res.status(404).json({ message: 'Product not found' });
     }
 
-    // Ownership check (IDOR mitigation)
+    // Ownership check (IDOR mitigation) — kept as fallback
     if (product.exporterEmail && product.exporterEmail !== req.user.email && !req.user.isAdmin) {
         throw new ApiError('Not authorized to modify this listing', 403);
     }
@@ -119,14 +121,14 @@ router.patch('/:id', verifyAuth, handleAsyncError(async (req, res) => {
     res.json(updatedProduct);
 }));
 
-// PATCH verify product — Admin Only + Audit Logged
-router.patch('/:id/verify', verifyAuth, requireAdmin, handleAsyncError(async (req, res) => {
+// PATCH verify product — Platform Operations Admin only + Audit Logged
+router.patch('/:id/verify', verifyAuth, requirePlatformRole('Operations Admin'), handleAsyncError(async (req, res) => {
     const { status, badge } = req.body;
     if (!['pending','verified','rejected'].includes(status)) throw new ApiError('Invalid status', 400);
-    
+
     const product = await Product.findByIdAndUpdate(
-        req.params.id, 
-        { verificationStatus: status, verificationBadge: badge, isApproved: status === 'verified' }, 
+        req.params.id,
+        { verificationStatus: status, verificationBadge: badge, isApproved: status === 'verified' },
         { new: true }
     );
     if (!product) return res.status(404).json({ message: 'Product not found' });
@@ -145,7 +147,7 @@ router.patch('/:id/verify', verifyAuth, requireAdmin, handleAsyncError(async (re
 }));
 
 // DELETE product — Authenticated (Owner or Admin)
-router.delete('/:id', verifyAuth, handleAsyncError(async (req, res) => {
+router.delete('/:id', verifyAuth, resolveOrg, requirePermission('product:delete(own)'), handleAsyncError(async (req, res) => {
     const product = await Product.findById(req.params.id);
     if (!product) {
         return res.status(404).json({ message: 'Product not found' });
