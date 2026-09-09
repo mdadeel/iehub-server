@@ -58,6 +58,13 @@ const productSchema = new mongoose.Schema({
         type: String,
         default: '0906.11', // Standard Harmonized Tariff Code
     },
+    orgId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Organization',
+        default: null,
+        index: true,
+        sparse: true,
+    },
     exporterEmail: {
         type: String,
         default: null // Null means it's a seed product or platform product. Email indicates user export.

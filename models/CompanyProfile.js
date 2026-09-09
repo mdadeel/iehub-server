@@ -1,6 +1,13 @@
 import mongoose from 'mongoose';
 
 const companyProfileSchema = new mongoose.Schema({
+    orgId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Organization',
+        default: null,
+        index: true,
+        sparse: true,
+    },
     userId: {
         type: String,
         required: true,

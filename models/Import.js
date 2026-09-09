@@ -1,6 +1,26 @@
 import mongoose from 'mongoose';
 
 const importSchema = new mongoose.Schema({
+    orgId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Organization',
+        default: null,
+        index: true,
+        sparse: true,
+    },
+    sellerOrgId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Organization',
+        default: null,
+        index: true,
+        sparse: true,
+    },
+    idempotencyKey: {
+        type: String,
+        default: null,
+        sparse: true,
+        index: true,
+    },
     userId: {
         type: String,
         required: true,

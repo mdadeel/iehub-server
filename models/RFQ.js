@@ -1,6 +1,20 @@
 import mongoose from 'mongoose';
 
 const rfqSchema = new mongoose.Schema({
+    orgId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Organization',
+        default: null,
+        index: true,
+        sparse: true,
+    },
+    sellerOrgId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Organization',
+        default: null,
+        index: true,
+        sparse: true,
+    },
     rfqNumber: {
         type: String,
         required: true,

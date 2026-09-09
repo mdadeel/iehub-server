@@ -9,6 +9,7 @@ import companyRoutes from './routes/companyRoutes.js';
 import rfqRoutes from './routes/rfqRoutes.js';
 import disputeRoutes from './routes/disputeRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
+import organizationRoutes from './routes/organizationRoutes.js';
 import { globalErrorHandler } from './utils/errorHandler.js';
 
 dotenv.config();
@@ -45,6 +46,7 @@ app.use('/api/company', companyRoutes);
 app.use('/api/rfq', rfqRoutes);
 app.use('/api/disputes', disputeRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/organizations', organizationRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

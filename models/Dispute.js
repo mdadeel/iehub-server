@@ -1,6 +1,13 @@
 import mongoose from 'mongoose';
 
 const disputeSchema = new mongoose.Schema({
+    orgId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Organization',
+        default: null,
+        index: true,
+        sparse: true,
+    },
     disputeNumber: {
         type: String,
         required: true,

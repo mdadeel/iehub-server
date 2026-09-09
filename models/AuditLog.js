@@ -1,6 +1,17 @@
 import mongoose from 'mongoose';
 
 const auditLogSchema = new mongoose.Schema({
+    orgId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Organization',
+        default: null,
+        index: true,
+        sparse: true,
+    },
+    actorOrgRole: {
+        type: String,
+        default: '',
+    },
     actorEmail: {
         type: String,
         required: true,
