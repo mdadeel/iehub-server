@@ -1,19 +1,32 @@
 import express from 'express';
 import Product from '../models/Product.js';
-import { handleAsyncError } from '../utils/errorHandler.js';
+import AuditLog from '../models/AuditLog.js';
+import { handleAsyncError, ApiError } from '../utils/errorHandler.js';
+import { verifyAuth, requireAdmin } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
+const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 const buildProductQuery = (query) => {
-    const { search, category, exporterEmail } = query;
+    const { search, category, exporterEmail, incoterm } = query;
     let filter = {};
 
     if (search) {
-        filter.name = { $regex: search, $options: 'i' };
+        const escaped = escapeRegex(search);
+        filter.$or = [
+            { name: { $regex: escaped, $options: 'i' } },
+            { origin: { $regex: escaped, $options: 'i' } },
+            { description: { $regex: escaped, $options: 'i' } },
+        ];
     }
 
     if (category && category !== 'All') {
         filter.category = category;
+    }
+
+    if (incoterm && incoterm !== 'All') {
+        filter.incoterm = incoterm;
     }
 
     if (exporterEmail) {
@@ -33,7 +46,7 @@ const getProductSortOption = (sortParam) => {
     }
 };
 
-// GET all products with filtering and searching
+// GET all products with filtering and searching (Public)
 router.get('/', handleAsyncError(async (req, res) => {
     const filter = buildProductQuery(req.query);
     const sortOption = getProductSortOption(req.query.sort);
@@ -42,7 +55,7 @@ router.get('/', handleAsyncError(async (req, res) => {
     res.json(products);
 }));
 
-// GET single product
+// GET single product (Public)
 router.get('/:id', handleAsyncError(async (req, res) => {
     const product = await Product.findById(req.params.id);
     if (!product) return res.status(404).json({ message: 'Product not found' });
@@ -57,38 +70,93 @@ const validateProductQuantity = (quantity) => {
     return { isValid: true };
 };
 
-// POST create product (Add Export)
-router.post('/', handleAsyncError(async (req, res) => {
-    const product = new Product(req.body);
+// POST create product (Add Export) — Authenticated
+router.post('/', verifyAuth, handleAsyncError(async (req, res) => {
+    const allowed = ['name', 'image', 'price', 'origin', 'rating', 'quantity', 'category', 'description', 'incoterm', 'unit', 'moq', 'portOfOrigin', 'currency'];
+    const data = {};
+    for (const k of allowed) if (req.body[k] !== undefined) data[k] = req.body[k];
+    
+    // Enforce exporterEmail strictly from authenticated token
+    data.exporterEmail = req.user.email;
+
+    if (!data.name || !data.image || data.price == null || !data.origin || data.quantity == null || !data.category) {
+        throw new ApiError('Missing required fields: name, image, price, origin, quantity, category', 400);
+    }
+    if (typeof data.price !== 'number' || data.price < 0) throw new ApiError('Price must be a non-negative number', 400);
+    if (typeof data.quantity !== 'number' || data.quantity < 0) throw new ApiError('Quantity must be a non-negative number', 400);
+    
+    const product = new Product(data);
     const newProduct = await product.save();
     res.status(201).json(newProduct);
 }));
 
-// PATCH update product (Update details or reduce quantity)
-router.patch('/:id', handleAsyncError(async (req, res) => {
+// PATCH update product — Authenticated (Owner or Admin)
+router.patch('/:id', verifyAuth, handleAsyncError(async (req, res) => {
     const product = await Product.findById(req.params.id);
     if (!product) {
         return res.status(404).json({ message: 'Product not found' });
     }
 
-    // Validate quantity if present in update
+    // Ownership check (IDOR mitigation)
+    if (product.exporterEmail && product.exporterEmail !== req.user.email && !req.user.isAdmin) {
+        throw new ApiError('Not authorized to modify this listing', 403);
+    }
+
     const quantityValidation = validateProductQuantity(req.body.quantity);
     if (!quantityValidation.isValid) {
         return res.status(400).json({ message: quantityValidation.message });
     }
+    if (req.body.price !== undefined && (typeof req.body.price !== 'number' || req.body.price < 0)) {
+        return res.status(400).json({ message: 'Price must be a non-negative number' });
+    }
 
-    Object.assign(product, req.body);
+    // Prevent mass-assignment of protected fields
+    const allowedPatch = ['name', 'image', 'price', 'origin', 'rating', 'quantity', 'category', 'description', 'incoterm', 'unit', 'moq', 'portOfOrigin', 'currency'];
+    const patch = {};
+    for (const k of allowedPatch) if (req.body[k] !== undefined) patch[k] = req.body[k];
+    Object.assign(product, patch);
     const updatedProduct = await product.save();
     res.json(updatedProduct);
 }));
 
-// DELETE product
-router.delete('/:id', handleAsyncError(async (req, res) => {
-    const product = await Product.findByIdAndDelete(req.params.id);
+// PATCH verify product — Admin Only + Audit Logged
+router.patch('/:id/verify', verifyAuth, requireAdmin, handleAsyncError(async (req, res) => {
+    const { status, badge } = req.body;
+    if (!['pending','verified','rejected'].includes(status)) throw new ApiError('Invalid status', 400);
+    
+    const product = await Product.findByIdAndUpdate(
+        req.params.id, 
+        { verificationStatus: status, verificationBadge: badge, isApproved: status === 'verified' }, 
+        { new: true }
+    );
+    if (!product) return res.status(404).json({ message: 'Product not found' });
+
+    // Record audit event
+    await AuditLog.create({
+        actorEmail: req.user.email,
+        action: `LISTING_${status.toUpperCase()}`,
+        targetEntity: 'Product',
+        targetId: String(product._id),
+        details: { badge, status, productName: product.name },
+        ipAddress: req.ip || '',
+    }).catch(err => console.error('Audit log failed:', err));
+
+    res.json(product);
+}));
+
+// DELETE product — Authenticated (Owner or Admin)
+router.delete('/:id', verifyAuth, handleAsyncError(async (req, res) => {
+    const product = await Product.findById(req.params.id);
     if (!product) {
         return res.status(404).json({ message: 'Product not found' });
     }
 
+    // Ownership check (IDOR mitigation)
+    if (product.exporterEmail && product.exporterEmail !== req.user.email && !req.user.isAdmin) {
+        throw new ApiError('Not authorized to delete this listing', 403);
+    }
+
+    await Product.findByIdAndDelete(req.params.id);
     res.json({ message: 'Product deleted' });
 }));
 
