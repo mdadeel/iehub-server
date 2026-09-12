@@ -13,6 +13,7 @@ import organizationRoutes from './routes/organizationRoutes.js';
 import documentRoutes from './routes/documentRoutes.js';
 import webhookRoutes from './routes/webhookRoutes.js';
 import analyticsRoutes from './routes/analyticsRoutes.js';
+import seoRoutes from './routes/seoRoutes.js';
 import { defaultLimiter } from './middleware/rateLimiter.js';
 import { globalErrorHandler } from './utils/errorHandler.js';
 import { correlationIdMiddleware } from './middleware/correlationId.js';
@@ -90,6 +91,7 @@ app.use('/api/organizations', organizationRoutes);
 app.use('/api/documents', documentRoutes);
 app.use('/api/webhooks', webhookRoutes);
 app.use('/api/analytics', analyticsRoutes);
+app.use('/api/seo', seoRoutes);
 
 // Enhanced deep health check endpoint
 app.get('/api/health', (req, res) => {
