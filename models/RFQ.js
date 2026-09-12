@@ -1,6 +1,26 @@
 import mongoose from 'mongoose';
 
 const rfqSchema = new mongoose.Schema({
+    // Mandatory Organization Tenancy (Bilateral)
+    organizationId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Organization',
+        default: null,
+        index: true,
+    },
+    buyerOrganizationId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Organization',
+        default: null,
+        index: true,
+    },
+    supplierOrganizationId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Organization',
+        default: null,
+        index: true,
+    },
+    // Backwards-compatible aliases
     orgId: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Organization',
@@ -15,6 +35,11 @@ const rfqSchema = new mongoose.Schema({
         index: true,
         sparse: true,
     },
+    createdByUserId: {
+        type: String,
+        default: '',
+        index: true,
+    },
     rfqNumber: {
         type: String,
         required: true,
@@ -25,14 +50,18 @@ const rfqSchema = new mongoose.Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Product',
         required: true,
+        index: true,
     },
     productName: {
         type: String,
         required: true,
+        trim: true,
     },
     buyerEmail: {
         type: String,
         required: true,
+        lowercase: true,
+        trim: true,
         index: true,
     },
     buyerName: {
@@ -42,15 +71,19 @@ const rfqSchema = new mongoose.Schema({
     exporterEmail: {
         type: String,
         required: true,
+        lowercase: true,
+        trim: true,
         index: true,
     },
     targetQuantity: {
         type: Number,
         required: true,
+        min: 1,
     },
     targetPrice: {
         type: Number,
         required: true,
+        min: 0,
     },
     unit: {
         type: String,
@@ -87,8 +120,29 @@ const rfqSchema = new mongoose.Schema({
             type: Date,
             default: Date.now,
         }
-    }]
+    }],
+    deletedAt: {
+        type: Date,
+        default: null,
+        index: true,
+    },
 }, { timestamps: true });
+
+// Pre-save hook: Sync tenant references
+rfqSchema.pre('save', function (next) {
+    if (this.buyerOrganizationId && !this.organizationId) this.organizationId = this.buyerOrganizationId;
+    if (this.organizationId && !this.buyerOrganizationId) this.buyerOrganizationId = this.organizationId;
+    if (this.orgId && !this.organizationId) this.organizationId = this.orgId;
+    if (this.organizationId && !this.orgId) this.orgId = this.organizationId;
+    if (this.sellerOrgId && !this.supplierOrganizationId) this.supplierOrganizationId = this.sellerOrgId;
+    if (this.supplierOrganizationId && !this.sellerOrgId) this.sellerOrgId = this.supplierOrganizationId;
+    next();
+});
+
+// Compound indexes for tenant-scoped querying
+rfqSchema.index({ buyerOrganizationId: 1, status: 1 });
+rfqSchema.index({ supplierOrganizationId: 1, status: 1 });
+rfqSchema.index({ organizationId: 1, createdAt: -1 });
 
 const RFQ = mongoose.model('RFQ', rfqSchema);
 

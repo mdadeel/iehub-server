@@ -11,8 +11,8 @@ const router = express.Router();
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const buildProductQuery = (query) => {
-    const { search, category, exporterEmail, incoterm } = query;
-    let filter = {};
+    const { search, category, exporterEmail, incoterm, organizationId } = query;
+    let filter = { deletedAt: null };
 
     if (search) {
         const escaped = escapeRegex(search);
@@ -33,6 +33,10 @@ const buildProductQuery = (query) => {
 
     if (exporterEmail) {
         filter.exporterEmail = exporterEmail;
+    }
+
+    if (organizationId) {
+        filter.organizationId = organizationId;
     }
 
     return filter;
@@ -74,18 +78,21 @@ const validateProductQuantity = (quantity) => {
 
 // POST create product (Add Export) — Authenticated + org role gate
 router.post('/', verifyAuth, resolveOrg, requirePermission('product:create'), handleAsyncError(async (req, res) => {
-    const allowed = ['name', 'image', 'price', 'origin', 'rating', 'quantity', 'category', 'description', 'incoterm', 'unit', 'moq', 'portOfOrigin', 'currency'];
+    const allowed = ['name', 'image', 'price', 'origin', 'rating', 'quantity', 'category', 'description', 'incoterm', 'unit', 'moq', 'portOfOrigin', 'currency', 'hsCode'];
     const data = {};
     for (const k of allowed) if (req.body[k] !== undefined) data[k] = req.body[k];
 
     // Enforce exporterEmail strictly from authenticated token
     data.exporterEmail = req.user.email;
+    data.organizationId = req.orgId || null;
+    data.orgId = req.orgId || null;
+    data.createdByUserId = req.user.uid;
 
     if (!data.name || !data.image || data.price == null || !data.origin || data.quantity == null || !data.category) {
         throw new ApiError('Missing required fields: name, image, price, origin, quantity, category', 400);
     }
     if (typeof data.price !== 'number' || data.price < 0) throw new ApiError('Price must be a non-negative number', 400);
-    if (typeof data.quantity !== 'number' || data.quantity < 0) throw new ApiError('Quantity must be a non-negative number');
+    if (typeof data.quantity !== 'number' || data.quantity < 0) throw new ApiError('Quantity must be a non-negative number', 400);
 
     const product = new Product(data);
     const newProduct = await product.save();
@@ -95,13 +102,17 @@ router.post('/', verifyAuth, resolveOrg, requirePermission('product:create'), ha
 // PATCH update product — Authenticated (Owner or Admin)
 router.patch('/:id', verifyAuth, resolveOrg, requirePermission('product:update(own)'), handleAsyncError(async (req, res) => {
     const product = await Product.findById(req.params.id);
-    if (!product) {
+    if (!product || product.deletedAt) {
         return res.status(404).json({ message: 'Product not found' });
     }
 
-    // Ownership check (IDOR mitigation) — kept as fallback
-    if (product.exporterEmail && product.exporterEmail !== req.user.email && !req.user.isAdmin) {
-        throw new ApiError('Not authorized to modify this listing', 403);
+    // Ownership check (Multi-tenant IDOR mitigation)
+    const isOwner = (product.organizationId && req.orgId && String(product.organizationId) === String(req.orgId)) ||
+                    (product.orgId && req.orgId && String(product.orgId) === String(req.orgId)) ||
+                    (product.exporterEmail && product.exporterEmail === req.user.email) ||
+                    req.user.isAdmin;
+    if (!isOwner) {
+        throw new ApiError('Not authorized to modify this listing for this organization', 403);
     }
 
     const quantityValidation = validateProductQuantity(req.body.quantity);
@@ -113,7 +124,7 @@ router.patch('/:id', verifyAuth, resolveOrg, requirePermission('product:update(o
     }
 
     // Prevent mass-assignment of protected fields
-    const allowedPatch = ['name', 'image', 'price', 'origin', 'rating', 'quantity', 'category', 'description', 'incoterm', 'unit', 'moq', 'portOfOrigin', 'currency'];
+    const allowedPatch = ['name', 'image', 'price', 'origin', 'rating', 'quantity', 'category', 'description', 'incoterm', 'unit', 'moq', 'portOfOrigin', 'currency', 'hsCode'];
     const patch = {};
     for (const k of allowedPatch) if (req.body[k] !== undefined) patch[k] = req.body[k];
     Object.assign(product, patch);
@@ -135,6 +146,7 @@ router.patch('/:id/verify', verifyAuth, requirePlatformRole('Operations Admin'),
 
     // Record audit event
     await AuditLog.create({
+        orgId: product.organizationId || product.orgId || null,
         actorEmail: req.user.email,
         action: `LISTING_${status.toUpperCase()}`,
         targetEntity: 'Product',
@@ -149,16 +161,21 @@ router.patch('/:id/verify', verifyAuth, requirePlatformRole('Operations Admin'),
 // DELETE product — Authenticated (Owner or Admin)
 router.delete('/:id', verifyAuth, resolveOrg, requirePermission('product:delete(own)'), handleAsyncError(async (req, res) => {
     const product = await Product.findById(req.params.id);
-    if (!product) {
+    if (!product || product.deletedAt) {
         return res.status(404).json({ message: 'Product not found' });
     }
 
-    // Ownership check (IDOR mitigation)
-    if (product.exporterEmail && product.exporterEmail !== req.user.email && !req.user.isAdmin) {
-        throw new ApiError('Not authorized to delete this listing', 403);
+    // Ownership check (Multi-tenant IDOR mitigation)
+    const isOwner = (product.organizationId && req.orgId && String(product.organizationId) === String(req.orgId)) ||
+                    (product.orgId && req.orgId && String(product.orgId) === String(req.orgId)) ||
+                    (product.exporterEmail && product.exporterEmail === req.user.email) ||
+                    req.user.isAdmin;
+    if (!isOwner) {
+        throw new ApiError('Not authorized to delete this listing for this organization', 403);
     }
 
-    await Product.findByIdAndDelete(req.params.id);
+    product.deletedAt = new Date();
+    await product.save();
     res.json({ message: 'Product deleted' });
 }));
 

@@ -6,21 +6,34 @@ import Import from '../models/Import.js';
 import AuditLog from '../models/AuditLog.js';
 import { handleAsyncError, ApiError } from '../utils/errorHandler.js';
 import { verifyAuth } from '../middleware/authMiddleware.js';
+import { resolveOrg } from '../middleware/resolveOrg.js';
+import { requirePermission } from '../middleware/requirePermission.js';
 
 const router = express.Router();
 
-// GET /api/rfq — List RFQs for authenticated buyer or seller
-router.get('/', verifyAuth, handleAsyncError(async (req, res) => {
+// GET /api/rfq — List RFQs for authenticated buyer, seller, or active organization
+router.get('/', verifyAuth, resolveOrg, requirePermission('rfq:read(own|inbound)'), handleAsyncError(async (req, res) => {
     const email = req.user.email;
-    const rfqs = await RFQ.find({
-        $or: [{ buyerEmail: email }, { exporterEmail: email }]
-    }).sort({ updatedAt: -1 });
+    let filter = { deletedAt: null };
 
+    if (req.orgId) {
+        filter.$or = [
+            { buyerOrganizationId: req.orgId },
+            { supplierOrganizationId: req.orgId },
+            { organizationId: req.orgId },
+            { buyerEmail: email },
+            { exporterEmail: email },
+        ];
+    } else {
+        filter.$or = [{ buyerEmail: email }, { exporterEmail: email }];
+    }
+
+    const rfqs = await RFQ.find(filter).sort({ updatedAt: -1 });
     res.json(rfqs);
 }));
 
-// POST /api/rfq — Submit new RFQ
-router.post('/', verifyAuth, handleAsyncError(async (req, res) => {
+// POST /api/rfq — Submit new RFQ with organization tenancy
+router.post('/', verifyAuth, resolveOrg, requirePermission('rfq:create'), handleAsyncError(async (req, res) => {
     const { productId, notes, incoterm } = req.body;
     const targetQuantity = req.body.targetQuantity || req.body.requestedQuantity;
     const targetPrice = req.body.targetPrice;
@@ -31,10 +44,18 @@ router.post('/', verifyAuth, handleAsyncError(async (req, res) => {
     }
 
     const product = await Product.findById(productId);
-    if (!product) throw new ApiError('Product not found', 404);
+    if (!product || product.deletedAt) throw new ApiError('Product not found', 404);
 
+    const buyerOrgId = req.orgId || null;
+    const supplierOrgId = product.organizationId || product.orgId || null;
     const rfqNumber = `RFQ-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`;
+
     const rfq = new RFQ({
+        organizationId: buyerOrgId,
+        buyerOrganizationId: buyerOrgId,
+        supplierOrganizationId: supplierOrgId,
+        sellerOrgId: supplierOrgId,
+        createdByUserId: req.user.uid,
         rfqNumber,
         productId,
         productName: product.name,
@@ -53,11 +74,12 @@ router.post('/', verifyAuth, handleAsyncError(async (req, res) => {
     await rfq.save();
 
     AuditLog.create({
+        orgId: buyerOrgId,
         actorEmail: req.user.email,
         action: 'RFQ_SUBMITTED',
         targetEntity: 'RFQ',
         targetId: String(rfq._id),
-        details: { rfqNumber, targetPrice, targetQuantity, productName: product.name },
+        details: { rfqNumber, targetPrice, targetQuantity, productName: product.name, buyerOrgId, supplierOrgId },
         ipAddress: req.ip || '',
     }).catch(err => console.error('Audit log failed:', err));
 
@@ -65,14 +87,18 @@ router.post('/', verifyAuth, handleAsyncError(async (req, res) => {
 }));
 
 // PATCH /api/rfq/:id/counter — Counter-offer
-router.patch('/:id/counter', verifyAuth, handleAsyncError(async (req, res) => {
+router.patch('/:id/counter', verifyAuth, resolveOrg, requirePermission('rfq:counter|accept|convert'), handleAsyncError(async (req, res) => {
     const { counterPrice, counterQuantity, notes } = req.body;
     const rfq = await RFQ.findById(req.params.id);
-    if (!rfq) throw new ApiError('RFQ not found', 404);
+    if (!rfq || rfq.deletedAt) throw new ApiError('RFQ not found', 404);
 
-    const isParty = rfq.buyerEmail === req.user.email || rfq.exporterEmail === req.user.email;
-    if (!isParty && !req.user.isAdmin) {
-        throw new ApiError('Not authorized to counter this RFQ', 403);
+    const isBuyer = (rfq.buyerOrganizationId && req.orgId && String(rfq.buyerOrganizationId) === String(req.orgId)) ||
+                    rfq.buyerEmail === req.user.email;
+    const isSupplier = (rfq.supplierOrganizationId && req.orgId && String(rfq.supplierOrganizationId) === String(req.orgId)) ||
+                       rfq.exporterEmail === req.user.email;
+
+    if (!isBuyer && !isSupplier && !req.user.isAdmin) {
+        throw new ApiError('Not authorized to counter this RFQ for this organization', 403);
     }
 
     rfq.counterOffers.push({
@@ -91,19 +117,24 @@ router.patch('/:id/counter', verifyAuth, handleAsyncError(async (req, res) => {
 }));
 
 // PATCH /api/rfq/:id/accept — Accept RFQ
-router.patch('/:id/accept', verifyAuth, handleAsyncError(async (req, res) => {
+router.patch('/:id/accept', verifyAuth, resolveOrg, requirePermission('rfq:counter|accept|convert'), handleAsyncError(async (req, res) => {
     const rfq = await RFQ.findById(req.params.id);
-    if (!rfq) throw new ApiError('RFQ not found', 404);
+    if (!rfq || rfq.deletedAt) throw new ApiError('RFQ not found', 404);
 
-    const isParty = rfq.buyerEmail === req.user.email || rfq.exporterEmail === req.user.email;
-    if (!isParty && !req.user.isAdmin) {
-        throw new ApiError('Not authorized to accept this RFQ', 403);
+    const isBuyer = (rfq.buyerOrganizationId && req.orgId && String(rfq.buyerOrganizationId) === String(req.orgId)) ||
+                    rfq.buyerEmail === req.user.email;
+    const isSupplier = (rfq.supplierOrganizationId && req.orgId && String(rfq.supplierOrganizationId) === String(req.orgId)) ||
+                       rfq.exporterEmail === req.user.email;
+
+    if (!isBuyer && !isSupplier && !req.user.isAdmin) {
+        throw new ApiError('Not authorized to accept this RFQ for this organization', 403);
     }
 
     rfq.status = 'Accepted';
     await rfq.save();
 
     AuditLog.create({
+        orgId: req.orgId || rfq.organizationId || null,
         actorEmail: req.user.email,
         action: 'RFQ_ACCEPTED',
         targetEntity: 'RFQ',
@@ -118,10 +149,15 @@ router.patch('/:id/accept', verifyAuth, handleAsyncError(async (req, res) => {
 // POST /api/rfq/:id/convert or /:id/convert-to-po — Convert accepted RFQ into binding Purchase Order
 const handleConvertRFQ = handleAsyncError(async (req, res) => {
     const rfq = await RFQ.findById(req.params.id);
-    if (!rfq) throw new ApiError('RFQ not found', 404);
-    if (rfq.buyerEmail !== req.user.email && !req.user.isAdmin) {
-        throw new ApiError('Only the buyer can execute a PO conversion', 403);
+    if (!rfq || rfq.deletedAt) throw new ApiError('RFQ not found', 404);
+
+    const isBuyer = (rfq.buyerOrganizationId && req.orgId && String(rfq.buyerOrganizationId) === String(req.orgId)) ||
+                    rfq.buyerEmail === req.user.email;
+
+    if (!isBuyer && !req.user.isAdmin) {
+        throw new ApiError('Only the buyer organization can execute a PO conversion', 403);
     }
+
     const allowed = ['Accepted', 'Quoted', 'Countered', 'Submitted'];
     if (!allowed.includes(rfq.status)) {
         throw new ApiError('This RFQ cannot be converted to a Purchase Order in its current state', 400);
@@ -132,7 +168,7 @@ const handleConvertRFQ = handleAsyncError(async (req, res) => {
 
     try {
         const product = await Product.findOneAndUpdate(
-            { _id: rfq.productId, quantity: { $gte: rfq.targetQuantity } },
+            { _id: rfq.productId, quantity: { $gte: rfq.targetQuantity }, deletedAt: null },
             { $inc: { quantity: -rfq.targetQuantity } },
             { new: true, session }
         );
@@ -142,10 +178,17 @@ const handleConvertRFQ = handleAsyncError(async (req, res) => {
             throw new ApiError('Insufficient inventory to fulfill negotiated RFQ quantity', 400);
         }
 
+        const buyerOrgId = rfq.buyerOrganizationId || req.orgId || null;
+        const supplierOrgId = rfq.supplierOrganizationId || product.organizationId || product.orgId || null;
         const poNumber = `PO-${new Date().getFullYear()}-${Math.floor(100000 + Math.random() * 900000)}`;
         const totalAmount = rfq.targetPrice * rfq.targetQuantity;
 
         const newImport = new Import({
+            organizationId: buyerOrgId,
+            buyerOrganizationId: buyerOrgId,
+            supplierOrganizationId: supplierOrgId,
+            sellerOrgId: supplierOrgId,
+            createdByUserId: req.user.uid,
             userId: req.user.uid,
             userEmail: req.user.email,
             productId: rfq.productId,
@@ -170,11 +213,12 @@ const handleConvertRFQ = handleAsyncError(async (req, res) => {
         await session.commitTransaction();
 
         AuditLog.create({
+            orgId: buyerOrgId,
             actorEmail: req.user.email,
             action: 'RFQ_CONVERTED_TO_PO',
             targetEntity: 'Import',
             targetId: String(newImport._id),
-            details: { rfqNumber: rfq.rfqNumber, poNumber },
+            details: { rfqNumber: rfq.rfqNumber, poNumber, buyerOrgId, supplierOrgId },
             ipAddress: req.ip || '',
         }).catch(err => console.error('Audit log failed:', err));
 
@@ -187,7 +231,7 @@ const handleConvertRFQ = handleAsyncError(async (req, res) => {
     }
 });
 
-router.post('/:id/convert', verifyAuth, handleConvertRFQ);
-router.post('/:id/convert-to-po', verifyAuth, handleConvertRFQ);
+router.post('/:id/convert', verifyAuth, resolveOrg, requirePermission('rfq:counter|accept|convert'), handleConvertRFQ);
+router.post('/:id/convert-to-po', verifyAuth, resolveOrg, requirePermission('rfq:counter|accept|convert'), handleConvertRFQ);
 
 export default router;

@@ -1,14 +1,21 @@
 import { ApiError } from '../utils/errorHandler.js';
 import { PlatformRole } from '../lib/roles.js';
+import { verifyFirebaseIdToken } from '../lib/firebaseAdmin.js';
+import logger from '../utils/logger.js';
 
-const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || 'admin121@gmail.com,admin@importexport.com')
-    .split(',')
-    .map(e => e.trim().toLowerCase())
-    .filter(Boolean);
+export function getAdminEmails() {
+    return (process.env.ADMIN_EMAILS || '')
+        .split(',')
+        .map(e => e.trim().toLowerCase())
+        .filter(Boolean);
+}
 
 /**
- * Verifies Firebase ID Token using Google OAuth2 TokenInfo endpoint.
- * Zero-dependency native implementation (uses Node 18+ global fetch).
+ * Enterprise Authentication Middleware
+ * 1. Checks Bearer token.
+ * 2. Strictly gates development sandbox bypass tokens.
+ * 3. Verifies token via Firebase Admin SDK / Google verification.
+ * 4. Checks admin authority against configured ADMIN_EMAILS (no hardcoded fallbacks).
  */
 export const verifyAuth = async (req, res, next) => {
     try {
@@ -22,70 +29,85 @@ export const verifyAuth = async (req, res, next) => {
             return next(new ApiError('Malformed authorization header', 401));
         }
 
-        // Demo/Guest token handling in development or sandbox mode
-        if (token.startsWith('guest-token-')) {
+        const isProd = process.env.NODE_ENV === 'production';
+        const isSandboxAllowed = !isProd && process.env.ENABLE_DEV_SANDBOX === 'true';
+
+        // Check for synthetic development tokens
+        if (token.startsWith('guest-token-') || token === 'demo-admin-token') {
+            if (!isSandboxAllowed) {
+                logger.warn('Sandbox token rejected: sandbox mode disabled in this environment', {
+                    tokenPrefix: token.slice(0, 12),
+                    nodeEnv: process.env.NODE_ENV,
+                    correlationId: req.correlationId,
+                });
+                return next(new ApiError('Development authentication bypass is disabled in this environment', 401));
+            }
+
+            // Sandbox explicitly enabled in local development
+            if (token === 'demo-admin-token') {
+                const adminEmails = getAdminEmails();
+                const adminEmail = adminEmails[0] || 'dev-admin@importexport.local';
+                req.user = {
+                    uid: 'demo-admin-uid',
+                    email: adminEmail,
+                    displayName: 'Demo Administrator (Dev Sandbox)',
+                    isGuest: false,
+                    isAdmin: true,
+                    platformRole: PlatformRole.SuperAdmin,
+                };
+                logger.debug('Authenticated via dev sandbox admin token', { correlationId: req.correlationId });
+                return next();
+            }
+
             req.user = {
                 uid: token,
-                email: 'guest@example.com',
+                email: 'guest@importexport.local',
+                displayName: 'Guest User (Dev Sandbox)',
                 isGuest: true,
                 isAdmin: false,
-                platformRole: null
+                platformRole: null,
             };
-            return next();
-        }
-        if (process.env.NODE_ENV !== 'production' && token === 'demo-admin-token') {
-            req.user = {
-                uid: 'demo-admin-uid',
-                email: 'admin121@gmail.com',
-                displayName: 'Demo Administrator',
-                isGuest: false,
-                isAdmin: true,
-                platformRole: PlatformRole.SuperAdmin
-            };
+            logger.debug('Authenticated via dev sandbox guest token', { correlationId: req.correlationId });
             return next();
         }
 
-        // Validate token against Google TokenInfo endpoint
-        const response = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(token)}`);
-        
-        if (!response.ok) {
-            const errData = await response.json().catch(() => ({}));
-            return next(new ApiError(errData.error_description || 'Invalid or expired authorization token', 401));
-        }
-
-        const payload = await response.json();
-        const expectedProjectId = process.env.FIREBASE_PROJECT_ID;
-
-        // Verify audience matches our Firebase project
-        if (expectedProjectId && payload.aud !== expectedProjectId) {
-            return next(new ApiError('Token audience does not match this project', 401));
-        }
-
-        const email = (payload.email || '').toLowerCase();
-        const isAdmin = ADMIN_EMAILS.includes(email);
+        // Verify Firebase ID token cryptographically
+        const decoded = await verifyFirebaseIdToken(token);
+        const adminEmails = getAdminEmails();
+        const isAdmin = adminEmails.includes(decoded.email);
         const platformRole = isAdmin ? PlatformRole.SuperAdmin : null;
 
         req.user = {
-            uid: payload.sub || payload.user_id,
-            email,
-            displayName: payload.name || '',
+            uid: decoded.uid,
+            email: decoded.email,
+            displayName: decoded.displayName || '',
             isAdmin,
             platformRole,
-            isGuest: false
+            isGuest: false,
         };
 
         next();
     } catch (err) {
+        logger.warn('Authentication token verification failed', {
+            error: err.message,
+            correlationId: req.correlationId,
+        });
         next(new ApiError(`Authentication failed: ${err.message}`, 401));
     }
 };
 
 /**
- * Role-Based Access Control: Enforces admin authority.
+ * Role-Based Access Control: Enforces platform admin authority.
  */
 export const requireAdmin = (req, res, next) => {
     if (!req.user || !req.user.isAdmin) {
+        logger.warn('Unauthorized administrative access attempt', {
+            userEmail: req.user?.email || 'unauthenticated',
+            correlationId: req.correlationId,
+        });
         return next(new ApiError('Administrative authority required for this operation', 403));
     }
     next();
 };
+
+export default { verifyAuth, requireAdmin };
