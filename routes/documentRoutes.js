@@ -30,13 +30,22 @@ router.get('/mock-download/:storageKey', (req, res) => {
 
 // --- 2. AUTHENTICATED DOCUMENT VAULT ENDPOINTS ---
 
-// GET /api/documents — List documents for the active organization
-router.get('/', verifyAuth, resolveOrg, requireOrg, handleAsyncError(async (req, res) => {
+// GET /api/documents — List documents for the active organization or user
+router.get('/', verifyAuth, resolveOrg, handleAsyncError(async (req, res) => {
     const { documentType, tradeRecordId, status } = req.query;
     const filter = {
-        organizationId: req.orgId,
         deletedAt: null,
     };
+
+    if (req.orgId) {
+        filter.organizationId = req.orgId;
+    } else if (req.user?.isAdmin) {
+        // Platform admin can view all documents
+    } else if (req.user?.email) {
+        filter.uploadedByEmail = req.user.email;
+    } else {
+        return res.json([]);
+    }
 
     if (documentType && documentType !== 'All') {
         filter.documentType = documentType;
